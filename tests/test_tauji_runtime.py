@@ -31,6 +31,26 @@ class GateProvider:
         pass
 
 
+class RecordingProvider:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def stream_response(self, **kwargs: Any) -> Any:
+        self.calls.append([message.text for message in kwargs["messages"]])
+        message = AssistantMessage(
+            content=[TextContent(text="DONE")],
+            api="test",
+            provider="test",
+            model="test",
+            usage=Usage(input=0, output=0, total_tokens=0),
+            stop_reason="stop",
+        )
+        yield AssistantDoneEvent(reason="stop", message=message)
+
+    async def aclose(self) -> None:
+        pass
+
+
 def settings(tmp_path: Path) -> Settings:
     root = tmp_path / "workspace"
     root.mkdir()
@@ -80,6 +100,20 @@ async def test_steering_is_durable_before_provider_finishes(tmp_path: Path) -> N
         if isinstance(message, UserMessage)
     ]
     assert texts == ["initial", "durable steering"]
+    await registry.aclose()
+
+
+async def test_idle_send_prompts_provider_without_unsolicited_turn(tmp_path: Path) -> None:
+    config = settings(tmp_path)
+    provider = RecordingProvider()
+    registry = AgentRegistry(config, provider=provider)
+    agent = await registry.create_agent(workspace=str(config.workspace_roots[0]))
+    sent = await registry.send(agent["id"], "follow up now")
+    runtime = await registry.get_runtime(agent["id"])
+    assert runtime._task is not None
+    await runtime._task
+    assert sent["run_id"] is not None
+    assert provider.calls == [["follow up now"]]
     await registry.aclose()
 
 

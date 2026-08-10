@@ -78,7 +78,6 @@ class AgentRuntime:
                 return self.current_run_id
 
             follow_up = UserMessage(content=message)
-            self.harness.follow_up_message(follow_up)
             run_id = self.registry._new_run_id()
             self.registry.store.create_run(
                 run_id,
@@ -86,7 +85,7 @@ class AgentRuntime:
                 f"[follow-up] {message}",
                 messages=(*self.harness.messages, follow_up),
             )
-            self._start(run_id, self.harness.continue_())
+            self._start(run_id, self.harness.prompt_message(follow_up))
             return run_id
 
     async def cancel(self, *, status: Literal["cancelled", "interrupted"] = "cancelled") -> None:
