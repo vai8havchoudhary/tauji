@@ -1,9 +1,11 @@
 import asyncio
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+import tauji.tools as tools_module
 from tauji.tools import _bash, _bwrap_command, _edit, _path, _read, _write
 
 
@@ -28,6 +30,42 @@ def test_path_cannot_escape_through_symlink(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="escapes"):
         _write(workspace, {"path": "link/leak", "content": "blocked"})
     assert not (outside / "leak").exists()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda root: _read(root, {"path": "race/target"}),
+        lambda root: _write(root, {"path": "race/target", "content": "escaped"}),
+        lambda root: _edit(root, {"path": "race/target", "old": "inside", "new": "escaped"}),
+    ],
+)
+def test_file_tools_reject_symlink_swapped_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: Callable[[Path], str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    race = workspace / "race"
+    race.mkdir(parents=True)
+    (race / "target").write_text("inside")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_target = outside / "target"
+    outside_target.write_text("outside")
+    original_path = tools_module._path
+
+    def swap_after_validation(root: Path, raw: object) -> Path:
+        validated = original_path(root, raw)
+        (race / "target").unlink()
+        race.rmdir()
+        race.symlink_to(outside, target_is_directory=True)
+        return validated
+
+    monkeypatch.setattr(tools_module, "_path", swap_after_validation)
+    with pytest.raises(OSError):
+        operation(workspace)
+    assert outside_target.read_text() == "outside"
 
 
 def test_bash_fails_closed_without_bubblewrap(tmp_path: Path) -> None:

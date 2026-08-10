@@ -117,6 +117,33 @@ async def test_idle_send_prompts_provider_without_unsolicited_turn(tmp_path: Pat
     await registry.aclose()
 
 
+async def test_send_waits_for_finishing_runtime_before_persisting(tmp_path: Path) -> None:
+    config = settings(tmp_path)
+    provider = RecordingProvider()
+    registry = AgentRegistry(config, provider=provider)
+    agent = await registry.create_agent(workspace=str(config.workspace_roots[0]))
+    runtime = await registry.get_runtime(agent["id"])
+    release = asyncio.Event()
+
+    async def finishing_notification() -> None:
+        await release.wait()
+
+    runtime._task = asyncio.create_task(finishing_notification())
+    send_task = asyncio.create_task(registry.send(agent["id"], "after notification"))
+    await asyncio.sleep(0.05)
+    assert not send_task.done()
+    assert registry.list_runs(agent["id"]) == []
+
+    release.set()
+    sent = await send_task
+    assert sent["run_id"] is not None
+    assert runtime._task is not None
+    await runtime._task
+    assert len(registry.list_runs(agent["id"])) == 1
+    assert provider.calls == [["after notification"]]
+    await registry.aclose()
+
+
 async def test_late_cancel_cannot_overwrite_completion(tmp_path: Path) -> None:
     config = settings(tmp_path)
     provider = GateProvider()

@@ -5,6 +5,7 @@ import os
 import shutil
 import signal
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -156,7 +157,9 @@ def _path(root: Path, raw: object) -> Path:
 
 def _read(root: Path, args: Mapping[str, JSONValue]) -> str:
     path = _path(root, args["path"])
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    descriptor = _open_workspace_file(root, path, os.O_RDONLY)
+    with os.fdopen(descriptor, encoding="utf-8", errors="replace") as file:
+        lines = file.read().splitlines()
     start = _integer_arg(args.get("start"), default=1, name="start")
     end = _integer_arg(args.get("end"), default=len(lines), name="end")
     if start < 1 or end < start:
@@ -170,8 +173,14 @@ def _write(root: Path, args: Mapping[str, JSONValue]) -> str:
     content = args["content"]
     if not isinstance(content, str):
         raise ValueError("content must be a string")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    descriptor = _open_workspace_file(
+        root,
+        path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        create_parents=True,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        file.write(content)
     return f"wrote {path.relative_to(root)} ({len(content)} chars)"
 
 
@@ -182,12 +191,48 @@ def _edit(root: Path, args: Mapping[str, JSONValue]) -> str:
         raise ValueError("old and new must be strings")
     if not old:
         raise ValueError("old must not be empty")
-    text = path.read_text(encoding="utf-8")
-    count = text.count(old)
-    if count != 1:
-        raise ValueError(f"expected exactly one match, found {count}")
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
+    descriptor = _open_workspace_file(root, path, os.O_RDWR)
+    with os.fdopen(descriptor, "r+", encoding="utf-8") as file:
+        text = file.read()
+        count = text.count(old)
+        if count != 1:
+            raise ValueError(f"expected exactly one match, found {count}")
+        file.seek(0)
+        file.write(text.replace(old, new, 1))
+        file.truncate()
     return f"edited {path.relative_to(root)}"
+
+
+def _open_workspace_file(
+    root: Path,
+    path: Path,
+    flags: int,
+    *,
+    create_parents: bool = False,
+) -> int:
+    """Open a validated path without following a concurrently swapped symlink."""
+    root = root.resolve()
+    parts = path.relative_to(root).parts
+    if not parts:
+        raise IsADirectoryError(path)
+
+    descriptors = [os.open(root, os.O_RDONLY | os.O_DIRECTORY)]
+    try:
+        parent = descriptors[-1]
+        for part in parts[:-1]:
+            if create_parents:
+                with suppress(FileExistsError):
+                    os.mkdir(part, dir_fd=parent)
+            parent = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+            descriptors.append(parent)
+        return os.open(parts[-1], flags | os.O_NOFOLLOW, 0o666, dir_fd=parent)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 async def _bash(

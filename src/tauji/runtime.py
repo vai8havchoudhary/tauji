@@ -70,23 +70,30 @@ class AgentRuntime:
     async def send(self, message: str) -> str | None:
         if not message.strip():
             raise ValueError("message must be non-empty")
-        async with self._control_lock:
-            if self.harness.is_running:
-                steering = UserMessage(content=message)
-                self.harness.steer_message(steering)
-                self._save_messages()
-                return self.current_run_id
-
-            follow_up = UserMessage(content=message)
-            run_id = self.registry._new_run_id()
-            self.registry.store.create_run(
-                run_id,
-                self.agent_id,
-                f"[follow-up] {message}",
-                messages=(*self.harness.messages, follow_up),
-            )
-            self._start(run_id, self.harness.prompt_message(follow_up))
-            return run_id
+        while True:
+            finishing: asyncio.Task[None] | None = None
+            async with self._control_lock:
+                if self.is_running and not self.harness.is_running:
+                    finishing = self._task
+                elif self.harness.is_running:
+                    steering = UserMessage(content=message)
+                    self.harness.steer_message(steering)
+                    self._save_messages()
+                    return self.current_run_id
+                else:
+                    follow_up = UserMessage(content=message)
+                    run_id = self.registry._new_run_id()
+                    self.registry.store.create_run(
+                        run_id,
+                        self.agent_id,
+                        f"[follow-up] {message}",
+                        messages=(*self.harness.messages, follow_up),
+                    )
+                    self._start(run_id, self.harness.prompt_message(follow_up))
+                    return run_id
+            if finishing is not None:
+                with suppress(asyncio.CancelledError):
+                    await asyncio.shield(finishing)
 
     async def cancel(self, *, status: Literal["cancelled", "interrupted"] = "cancelled") -> None:
         self._cancel_status = status
