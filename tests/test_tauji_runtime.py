@@ -2,6 +2,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from tau_agent.messages import AssistantMessage, TextContent, Usage, UserMessage
 from tau_agent.provider_events import AssistantDoneEvent
 from tauji.config import Settings
@@ -141,6 +143,31 @@ async def test_send_waits_for_finishing_runtime_before_persisting(tmp_path: Path
     await runtime._task
     assert len(registry.list_runs(agent["id"])) == 1
     assert provider.calls == [["after notification"]]
+    await registry.aclose()
+
+
+async def test_cancelled_send_does_not_resume_after_finishing_runtime(tmp_path: Path) -> None:
+    config = settings(tmp_path)
+    provider = RecordingProvider()
+    registry = AgentRegistry(config, provider=provider)
+    agent = await registry.create_agent(workspace=str(config.workspace_roots[0]))
+    runtime = await registry.get_runtime(agent["id"])
+    release = asyncio.Event()
+
+    async def finishing_notification() -> None:
+        await release.wait()
+
+    runtime._task = asyncio.create_task(finishing_notification())
+    send_task = asyncio.create_task(registry.send(agent["id"], "must not run"))
+    await asyncio.sleep(0.05)
+    send_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await send_task
+    release.set()
+    assert runtime._task is not None
+    await runtime._task
+    assert registry.list_runs(agent["id"]) == []
+    assert provider.calls == []
     await registry.aclose()
 
 

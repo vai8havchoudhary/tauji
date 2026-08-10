@@ -92,8 +92,11 @@ class AgentRuntime:
                     self._start(run_id, self.harness.prompt_message(follow_up))
                     return run_id
             if finishing is not None:
-                with suppress(asyncio.CancelledError):
+                try:
                     await asyncio.shield(finishing)
+                except asyncio.CancelledError:
+                    if not finishing.cancelled():
+                        raise
 
     async def cancel(self, *, status: Literal["cancelled", "interrupted"] = "cancelled") -> None:
         self._cancel_status = status
