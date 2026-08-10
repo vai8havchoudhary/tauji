@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from mcp.server import MCPServer
@@ -9,14 +11,22 @@ from tauji.runtime import AgentRegistry
 
 
 def create_server(registry: AgentRegistry) -> MCPServer:
+    @asynccontextmanager
+    async def lifespan(_server: MCPServer) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            await registry.aclose()
+
     mcp = MCPServer(
         "tauji",
         description="Durable remote coding-agent harness for VPS workspaces.",
         instructions=(
             "Create durable agents for remote workspaces. agent_run returns an explicit run handle "
-            "immediately; use run_get/run_list to inspect completion. agent_send steers or resumes a "
-            "retained agent. Child agents created by fork use the same durable registry."
+            "immediately; use run_get/run_list to inspect completion. agent_send steers or resumes "
+            "a retained agent. Child agents created by fork use the same durable registry."
         ),
+        lifespan=lifespan,
     )
 
     @mcp.tool()

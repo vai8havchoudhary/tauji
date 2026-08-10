@@ -11,7 +11,8 @@ the repository, and sends every model request through one OpenAI-compatible CLIP
 ```text
 Claude Code / Codex
         |
-        | MCP 2026-07-28 / Streamable HTTP
+        | MCP / Streamable HTTP
+        | (protocol negotiated by the SDK)
         v
       Tauji
         |
@@ -39,6 +40,12 @@ git switch mcp-agent-harness
 uv sync
 ```
 
+Tauji's shell tool requires Bubblewrap and fails closed when it is unavailable. On Ubuntu:
+
+```bash
+sudo apt-get install bubblewrap
+```
+
 ## Configure
 
 ```bash
@@ -55,6 +62,11 @@ export TAUJI_PORT=8765
 
 export TAUJI_DATA_DIR=$HOME/.tauji
 export TAUJI_MAX_DEPTH=1
+
+# Shell commands run without network access by default. Enable only when the
+# selected workspace is allowed to use the VPS network.
+export TAUJI_BASH_NETWORK=false
+export TAUJI_BWRAP=bwrap
 ```
 
 Start it:
@@ -108,6 +120,12 @@ bash
 fork
 ```
 
+`read`, `write`, and `edit` reject paths outside the selected workspace. `bash` runs inside a
+mandatory Bubblewrap sandbox with a synthetic home, a scrubbed environment, read-only system
+tools, and only the workspace mounted read/write. Host home directories, SSH credentials, runtime
+sockets, and unrelated files are not mounted. Network is isolated unless `TAUJI_BASH_NETWORK` is
+explicitly enabled. Timeout and cancellation terminate the complete sandbox process group.
+
 `fork(task, name?, model?)` creates an isolated child context in the same workspace and returns
 its `agent_id` and `run_id` immediately. On completion the child result is injected into its parent.
 If the parent is idle, that delivery starts a continuation; if it is active, it becomes steering.
@@ -123,8 +141,7 @@ uv run ruff check .
 uv run mypy
 ```
 
-`uv.lock` is intentionally not committed while the MCP v2 SDK is moving quickly; `uv sync`
-resolves from `pyproject.toml`.
+`uv.lock` pins the tested dependency graph. Update it intentionally with `uv lock --upgrade`.
 
 ## License
 

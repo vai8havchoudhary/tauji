@@ -16,9 +16,11 @@ class Settings:
     port: int
     max_depth: int
     request_timeout: float
+    bwrap_path: str = "bwrap"
+    bash_network: bool = False
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         roots = tuple(
             Path(raw).expanduser().resolve()
             for raw in os.environ.get("TAUJI_WORKSPACE_ROOTS", "/srv:/startup:/home").split(":")
@@ -47,6 +49,8 @@ class Settings:
             port=port,
             max_depth=max_depth,
             request_timeout=timeout,
+            bwrap_path=os.environ.get("TAUJI_BWRAP", "bwrap"),
+            bash_network=_env_bool("TAUJI_BASH_NETWORK", default=False),
         )
 
     def validate_workspace(self, workspace: str) -> Path:
@@ -57,3 +61,15 @@ class Settings:
             allowed = ", ".join(str(root) for root in self.workspace_roots)
             raise ValueError(f"workspace {path} is outside TAUJI_WORKSPACE_ROOTS ({allowed})")
         return path
+
+
+def _env_bool(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be one of 1/0, true/false, yes/no, or on/off")

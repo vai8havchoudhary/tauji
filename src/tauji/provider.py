@@ -8,6 +8,7 @@ import httpx
 
 from tau_agent.messages import (
     AgentMessage,
+    AssistantContent,
     AssistantMessage,
     BashExecutionMessage,
     BranchSummaryMessage,
@@ -80,21 +81,31 @@ class CLIProxyProvider:
 
         try:
             data = await self._post(payload)
-            choice = data["choices"][0]
-            raw_message = choice["message"]
+            choice, raw_message = _response_message(data)
 
-            content = []
-            text = raw_message.get("content") or ""
+            content: list[AssistantContent] = []
+            text = raw_message.get("content")
             if text:
                 content.append(TextContent(text=text))
-            for raw_call in raw_message.get("tool_calls") or ():
-                fn = raw_call["function"]
+            raw_calls = raw_message.get("tool_calls") or []
+            for raw_call in raw_calls:
+                if not isinstance(raw_call, dict):
+                    raise ValueError("tool call must be an object")
+                call_id = raw_call.get("id")
+                fn = raw_call.get("function")
+                if not isinstance(call_id, str) or not call_id:
+                    raise ValueError("tool call id must be a non-empty string")
+                if not isinstance(fn, dict):
+                    raise ValueError("tool call function must be an object")
+                name = fn.get("name")
+                if not isinstance(name, str) or not name:
+                    raise ValueError("tool call function name must be a non-empty string")
                 arguments = fn.get("arguments") or "{}"
                 if isinstance(arguments, str):
                     arguments = json.loads(arguments)
                 if not isinstance(arguments, dict):
                     raise ValueError("tool call arguments must decode to an object")
-                content.append(ToolCall(id=raw_call["id"], name=fn["name"], arguments=arguments))
+                content.append(ToolCall(id=call_id, name=name, arguments=arguments))
 
             finish_reason = choice.get("finish_reason")
             stop_reason: Literal["toolUse", "length", "stop"] = (
@@ -149,6 +160,32 @@ class CLIProxyProvider:
         if not isinstance(data, dict):
             raise ValueError("CLIProxyAPI returned a non-object response")
         return data
+
+
+def _response_message(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("CLIProxyAPI response must contain at least one choice")
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise ValueError("CLIProxyAPI choice must be an object")
+    raw_message = choice.get("message")
+    if not isinstance(raw_message, dict):
+        raise ValueError("CLIProxyAPI choice must contain a message object")
+
+    text = raw_message.get("content")
+    if text is not None and not isinstance(text, str):
+        raise ValueError("CLIProxyAPI message content must be a string or null")
+    raw_calls = raw_message.get("tool_calls")
+    if raw_calls is not None and not isinstance(raw_calls, list):
+        raise ValueError("CLIProxyAPI message tool_calls must be a list or null")
+    if not text and not raw_calls:
+        raise ValueError("CLIProxyAPI message contains neither content nor tool calls")
+
+    finish_reason = choice.get("finish_reason")
+    if finish_reason not in {"stop", "length", "tool_calls", "function_call", "content_filter"}:
+        raise ValueError(f"unsupported CLIProxyAPI finish_reason: {finish_reason!r}")
+    return choice, raw_message
 
 
 def _error_message(

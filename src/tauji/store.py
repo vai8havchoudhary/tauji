@@ -3,14 +3,15 @@ from __future__ import annotations
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import TypeAdapter
 
 from tau_agent.messages import AgentMessage
 
-_MESSAGE = TypeAdapter(AgentMessage)
+_MESSAGE: TypeAdapter[AgentMessage] = TypeAdapter(AgentMessage)
 _AGENT_FIELDS = ("id", "name", "parent_id", "workspace", "model", "depth", "status")
+RunStatus = Literal["running", "completed", "failed", "cancelled", "interrupted"]
 
 
 class Store:
@@ -107,14 +108,7 @@ class Store:
 
     def save_messages(self, agent_id: str, messages: tuple[AgentMessage, ...]) -> None:
         with self._lock:
-            self._db.execute("DELETE FROM messages WHERE agent_id=?", (agent_id,))
-            self._db.executemany(
-                "INSERT INTO messages(agent_id,seq,payload) VALUES(?,?,?)",
-                (
-                    (agent_id, index, message.model_dump_json(by_alias=False))
-                    for index, message in enumerate(messages)
-                ),
-            )
+            self._replace_messages(agent_id, messages)
             self._db.commit()
 
     def load_messages(self, agent_id: str) -> list[AgentMessage]:
@@ -125,28 +119,39 @@ class Store:
             ).fetchall()
         return [_MESSAGE.validate_json(row["payload"]) for row in rows]
 
-    def create_run(self, run_id: str, agent_id: str, prompt: str) -> None:
+    def create_run(
+        self,
+        run_id: str,
+        agent_id: str,
+        prompt: str,
+        *,
+        messages: tuple[AgentMessage, ...] | None = None,
+    ) -> None:
         with self._lock:
             self._db.execute(
                 "INSERT INTO runs(id,agent_id,prompt,status) VALUES(?,?,?,'running')",
                 (run_id, agent_id, prompt),
             )
+            if messages is not None:
+                self._replace_messages(agent_id, messages)
             self._db.commit()
 
     def finish_run(
         self,
         run_id: str,
-        status: str,
+        status: RunStatus,
         *,
         result: str | None = None,
         error: str | None = None,
-    ) -> None:
+    ) -> bool:
         with self._lock:
-            self._db.execute(
-                "UPDATE runs SET status=?,result=?,error=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            cursor = self._db.execute(
+                "UPDATE runs SET status=?,result=?,error=?,updated_at=CURRENT_TIMESTAMP "
+                "WHERE id=? AND status='running'",
                 (status, result, error, run_id),
             )
             self._db.commit()
+            return cursor.rowcount == 1
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return self._one("SELECT * FROM runs WHERE id=?", (run_id,))
@@ -173,3 +178,13 @@ class Store:
         with self._lock:
             row = self._db.execute(sql, params).fetchone()
             return dict(row) if row else None
+
+    def _replace_messages(self, agent_id: str, messages: tuple[AgentMessage, ...]) -> None:
+        self._db.execute("DELETE FROM messages WHERE agent_id=?", (agent_id,))
+        self._db.executemany(
+            "INSERT INTO messages(agent_id,seq,payload) VALUES(?,?,?)",
+            (
+                (agent_id, index, message.model_dump_json(by_alias=False))
+                for index, message in enumerate(messages)
+            ),
+        )

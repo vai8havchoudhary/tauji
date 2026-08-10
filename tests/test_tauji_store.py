@@ -37,3 +37,14 @@ def test_delete_parent_cascades_children_and_runs(tmp_path: Path) -> None:
     assert store.get_agent("agt_2") is None
     assert store.get_run("run_2") is None
     store.close()
+
+
+def test_first_terminal_run_status_wins(tmp_path: Path) -> None:
+    store = Store(tmp_path / "tauji.db")
+    store.upsert_agent(_agent())
+    store.create_run("run_1", "agt_1", "hello")
+    assert store.finish_run("run_1", "completed", result="done") is True
+    assert store.finish_run("run_1", "cancelled", error="late cancel") is False
+    assert store.get_run("run_1")["status"] == "completed"
+    assert store.get_run("run_1")["result"] == "done"
+    store.close()

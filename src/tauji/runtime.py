@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from tau_agent.events import AgentEndEvent
+from tau_agent.events import (
+    AgentEndEvent,
+    AgentStartEvent,
+    MessageEndEvent,
+    ToolExecutionStartEvent,
+    TurnEndEvent,
+)
 from tau_agent.harness import AgentHarness, AgentHarnessConfig
-from tau_agent.messages import AssistantMessage
-
+from tau_agent.messages import AssistantMessage, UserMessage
 from tauji.config import Settings
 from tauji.provider import CLIProxyProvider
-from tauji.store import Store
+from tauji.store import RunStatus, Store
 from tauji.tools import coding_tools
 
 SYSTEM_PROMPT = """You are Tauji, a coding agent running beside the repository on a VPS.
@@ -25,7 +31,7 @@ class AgentRuntime:
     def __init__(
         self,
         *,
-        registry: "AgentRegistry",
+        registry: AgentRegistry,
         row: dict[str, Any],
         messages: list[Any],
     ) -> None:
@@ -38,6 +44,8 @@ class AgentRuntime:
         self.parent_id = row["parent_id"]
         self.current_run_id: str | None = None
         self._task: asyncio.Task[None] | None = None
+        self._control_lock = asyncio.Lock()
+        self._cancel_status: Literal["cancelled", "interrupted"] = "cancelled"
 
         config = AgentHarnessConfig(
             provider=registry.provider,
@@ -62,25 +70,31 @@ class AgentRuntime:
     async def send(self, message: str) -> str | None:
         if not message.strip():
             raise ValueError("message must be non-empty")
-        if self.harness.is_running:
-            self.harness.steer(message)
-            return self.current_run_id
+        async with self._control_lock:
+            if self.harness.is_running:
+                self.harness.steer(message)
+                return self.current_run_id
 
-        self.harness.follow_up(message)
-        run_id = self.registry._new_run_id()
-        self.registry.store.create_run(run_id, self.agent_id, f"[follow-up] {message}")
-        self._start(run_id, self.harness.continue_())
-        return run_id
+            follow_up = UserMessage(content=message)
+            self.harness.follow_up_message(follow_up)
+            run_id = self.registry._new_run_id()
+            self.registry.store.create_run(
+                run_id,
+                self.agent_id,
+                f"[follow-up] {message}",
+                messages=(*self.harness.messages, follow_up),
+            )
+            self._start(run_id, self.harness.continue_())
+            return run_id
 
-    async def cancel(self) -> None:
+    async def cancel(self, *, status: Literal["cancelled", "interrupted"] = "cancelled") -> None:
+        self._cancel_status = status
         self.harness.cancel()
         task = self._task
         if task is not None and not task.done():
             task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
 
     def _start(self, run_id: str, stream: Any) -> None:
         if self.is_running:
@@ -96,34 +110,46 @@ class AgentRuntime:
         terminal: AssistantMessage | None = None
         try:
             async for event in stream:
+                if isinstance(
+                    event,
+                    (AgentStartEvent, MessageEndEvent, ToolExecutionStartEvent, TurnEndEvent),
+                ):
+                    self.registry.store.save_messages(self.agent_id, self.harness.messages)
                 if isinstance(event, AgentEndEvent):
                     terminal = _last_assistant(event.messages)
 
             self.registry.store.save_messages(self.agent_id, self.harness.messages)
             if terminal is not None and terminal.stop_reason in {"error", "aborted"}:
-                status = "cancelled" if terminal.stop_reason == "aborted" else "failed"
+                status: RunStatus = "cancelled" if terminal.stop_reason == "aborted" else "failed"
                 error = terminal.error_message or terminal.stop_reason
-                self.registry.store.finish_run(run_id, status, error=error)
-                await self._notify_parent(run_id, error=error)
+                changed = self.registry.store.finish_run(run_id, status, error=error)
+                if changed:
+                    await self._notify_parent(run_id, error=error)
             else:
                 result = terminal.text if terminal is not None else ""
-                self.registry.store.finish_run(run_id, "completed", result=result)
-                await self._notify_parent(run_id, result=result)
+                changed = self.registry.store.finish_run(run_id, "completed", result=result)
+                if changed:
+                    await self._notify_parent(run_id, result=result)
             self.registry.set_agent_status(self.agent_id, "idle")
         except asyncio.CancelledError:
             self.registry.store.save_messages(self.agent_id, self.harness.messages)
-            self.registry.store.finish_run(run_id, "cancelled", error="cancelled")
+            error = "cancelled" if self._cancel_status == "cancelled" else "tauji stopped"
+            changed = self.registry.store.finish_run(run_id, self._cancel_status, error=error)
             self.registry.set_agent_status(self.agent_id, "idle")
+            if changed and self._cancel_status == "cancelled":
+                await self._notify_parent(run_id, error=error)
             raise
         except Exception as exc:
             error = str(exc)
             self.registry.store.save_messages(self.agent_id, self.harness.messages)
-            self.registry.store.finish_run(run_id, "failed", error=error)
+            changed = self.registry.store.finish_run(run_id, "failed", error=error)
             self.registry.set_agent_status(self.agent_id, "idle")
-            await self._notify_parent(run_id, error=error)
+            if changed:
+                await self._notify_parent(run_id, error=error)
         finally:
             if self.current_run_id == run_id:
                 self.current_run_id = None
+            self._cancel_status = "cancelled"
 
     async def _notify_parent(
         self,
@@ -168,7 +194,10 @@ class AgentRegistry:
 
     async def aclose(self) -> None:
         runtimes = list(self._agents.values())
-        await asyncio.gather(*(runtime.cancel() for runtime in runtimes), return_exceptions=True)
+        await asyncio.gather(
+            *(runtime.cancel(status="interrupted") for runtime in runtimes),
+            return_exceptions=True,
+        )
         await self.provider.aclose()
         self.store.close()
 
@@ -226,13 +255,17 @@ class AgentRegistry:
         if not prompt.strip():
             raise ValueError("prompt must be non-empty")
         runtime = await self.get_runtime(agent_id)
-        run_id = self._new_run_id()
-        self.store.create_run(run_id, agent_id, prompt)
-        try:
-            await runtime.start_prompt(run_id, prompt)
-        except Exception:
-            self.store.finish_run(run_id, "failed", error="run admission failed")
-            raise
+        async with runtime._control_lock:
+            if runtime.is_running:
+                raise RuntimeError(f"agent {agent_id} already has an active run")
+            run_id = self._new_run_id()
+            durable_messages = (*runtime.harness.messages, UserMessage(content=prompt))
+            self.store.create_run(run_id, agent_id, prompt, messages=durable_messages)
+            try:
+                await runtime.start_prompt(run_id, prompt)
+            except Exception:
+                self.store.finish_run(run_id, "failed", error="run admission failed")
+                raise
         return self.run_info(run_id)
 
     async def send(self, agent_id: str, message: str) -> dict[str, Any]:
@@ -248,17 +281,22 @@ class AgentRegistry:
             return row
 
         runtime = await self.get_runtime(str(row["agent_id"]))
-        if runtime.current_run_id == run_id and runtime.is_running:
-            await runtime.cancel()
-        else:
-            self.store.finish_run(run_id, "cancelled", error="no active runtime")
+        async with runtime._control_lock:
+            current = self.store.get_run(run_id)
+            if current is None or current["status"] != "running":
+                return self.run_info(run_id)
+            if runtime.current_run_id == run_id and runtime.is_running:
+                await runtime.cancel()
+            else:
+                self.store.finish_run(run_id, "cancelled", error="no active runtime")
         return self.run_info(run_id)
 
     async def delete_agent(self, agent_id: str) -> dict[str, Any]:
         runtime = await self.get_runtime(agent_id)
         for child in self.store.list_agents(agent_id):
             await self.delete_agent(str(child["id"]))
-        await runtime.cancel()
+        async with runtime._control_lock:
+            await runtime.cancel()
         info = self.agent_info(agent_id)
         self.store.delete_agent(agent_id)
         async with self._lock:
@@ -279,9 +317,7 @@ class AgentRegistry:
         body = error if error is not None else (result or "")
         parent = await self.get_runtime(parent_id)
         await parent.send(
-            f"<{tag} agent_id={child_id!r} run_id={run_id!r} name={child_name!r}>\n"
-            f"{body}\n"
-            f"</{tag}>"
+            f"<{tag} agent_id={child_id!r} run_id={run_id!r} name={child_name!r}>\n{body}\n</{tag}>"
         )
 
     def agent_info(self, agent_id: str) -> dict[str, Any]:
