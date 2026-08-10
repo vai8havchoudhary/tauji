@@ -113,9 +113,8 @@ def _tool(
         _on_update: Any = None,
     ) -> AgentToolResult:
         value = fn(args)
-        if asyncio.iscoroutine(value):
-            value = await value
-        return AgentToolResult(content=[TextContent(text=str(value))])
+        text = value if isinstance(value, str) else await value
+        return AgentToolResult(content=[TextContent(text=text)])
 
     return AgentTool(
         name=name,
@@ -214,7 +213,4 @@ async def _fork(runtime: "AgentRuntime", args: Mapping[str, JSONValue]) -> str:
         parent_id=runtime.agent_id,
     )
     run = await runtime.registry.run_agent(child["id"], task)
-    return (
-        f"spawned child agent_id={child['id']} run_id={run['id']} "
-        f"name={child['name']}"
-    )
+    return f"spawned child agent_id={child['id']} run_id={run['id']} name={child['name']}"
