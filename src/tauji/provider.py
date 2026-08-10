@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -94,12 +94,10 @@ class CLIProxyProvider:
                     arguments = json.loads(arguments)
                 if not isinstance(arguments, dict):
                     raise ValueError("tool call arguments must decode to an object")
-                content.append(
-                    ToolCall(id=raw_call["id"], name=fn["name"], arguments=arguments)
-                )
+                content.append(ToolCall(id=raw_call["id"], name=fn["name"], arguments=arguments))
 
             finish_reason = choice.get("finish_reason")
-            stop_reason = (
+            stop_reason: Literal["toolUse", "length", "stop"] = (
                 "toolUse"
                 if any(isinstance(block, ToolCall) for block in content)
                 else "length"
@@ -153,7 +151,9 @@ class CLIProxyProvider:
         return data
 
 
-def _error_message(model: str, reason: str, message: str) -> AssistantMessage:
+def _error_message(
+    model: str, reason: Literal["aborted", "error"], message: str
+) -> AssistantMessage:
     return AssistantMessage(
         content=[],
         api="openai-chat",
