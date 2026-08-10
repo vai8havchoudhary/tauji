@@ -196,6 +196,68 @@ async def test_immediate_cancel_finishes_run_before_task_starts(tmp_path: Path) 
     await registry.aclose()
 
 
+async def test_run_admission_rolls_back_when_checkpoint_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = settings(tmp_path)
+    provider = RecordingProvider()
+    registry = AgentRegistry(config, provider=provider)
+    agent = await registry.create_agent(workspace=str(config.workspace_roots[0]))
+    runtime = await registry.get_runtime(agent["id"])
+    save_messages = registry.store.save_messages
+
+    def fail_save(_agent_id: str, _messages: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(registry.store, "save_messages", fail_save)
+    with pytest.raises(OSError, match="disk full"):
+        await registry.run_agent(agent["id"], "one")
+
+    assert runtime.is_running is False
+    assert runtime.harness.is_running is False
+    assert runtime.current_run_id is None
+    assert registry.list_runs(agent["id"])[0]["status"] == "failed"
+
+    monkeypatch.setattr(registry.store, "save_messages", save_messages)
+    sent = await registry.send(agent["id"], "two")
+    assert runtime._task is not None
+    await runtime._task
+    assert registry.run_info(sent["run_id"])["status"] == "completed"
+    assert provider.calls == [["two"]]
+    await registry.aclose()
+
+
+async def test_idle_send_admission_rolls_back_when_checkpoint_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = settings(tmp_path)
+    provider = RecordingProvider()
+    registry = AgentRegistry(config, provider=provider)
+    agent = await registry.create_agent(workspace=str(config.workspace_roots[0]))
+    runtime = await registry.get_runtime(agent["id"])
+    save_messages = registry.store.save_messages
+
+    def fail_save(_agent_id: str, _messages: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(registry.store, "save_messages", fail_save)
+    with pytest.raises(OSError, match="disk full"):
+        await registry.send(agent["id"], "one")
+
+    assert runtime.is_running is False
+    assert runtime.harness.is_running is False
+    assert runtime.current_run_id is None
+    assert registry.list_runs(agent["id"])[0]["status"] == "failed"
+
+    monkeypatch.setattr(registry.store, "save_messages", save_messages)
+    sent = await registry.send(agent["id"], "two")
+    assert runtime._task is not None
+    await runtime._task
+    assert registry.run_info(sent["run_id"])["status"] == "completed"
+    assert provider.calls == [["two"]]
+    await registry.aclose()
+
+
 async def test_concurrent_run_admission_creates_one_run(tmp_path: Path) -> None:
     config = settings(tmp_path)
     provider = GateProvider()

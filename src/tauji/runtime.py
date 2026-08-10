@@ -78,7 +78,13 @@ class AgentRuntime:
                         f"[follow-up] {message}",
                         messages=(*self.harness.messages, UserMessage(content=message)),
                     )
-                    self._start(run_id, message)
+                    try:
+                        self._start(run_id, message)
+                    except Exception:
+                        self.registry.store.finish_run(
+                            run_id, "failed", error="run admission failed"
+                        )
+                        raise
                     return run_id
             if finishing is not None:
                 try:
@@ -110,12 +116,17 @@ class AgentRuntime:
     def _start(self, run_id: str, prompt: str) -> None:
         if self.is_running:
             raise RuntimeError(f"agent {self.agent_id} already has an active run")
-        self.current_run_id = run_id
         self.harness.prepare_prompt(prompt, self._save_messages)
-        self._task = asyncio.create_task(
-            self._consume(run_id),
-            name=f"tauji:{run_id}",
-        )
+        self.current_run_id = run_id
+        try:
+            self._task = asyncio.create_task(
+                self._consume(run_id),
+                name=f"tauji:{run_id}",
+            )
+        except BaseException:
+            self.current_run_id = None
+            self.harness.interrupt()
+            raise
 
     async def _consume(self, run_id: str) -> None:
         self.registry.set_agent_status(self.agent_id, "running")

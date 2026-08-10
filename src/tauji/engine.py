@@ -82,10 +82,16 @@ class AgentHarness:
         """Admit a prompt synchronously before background execution starts."""
         if self._running:
             raise RuntimeError("agent is already running; use agent_send to steer it")
-        self._append_interrupted_tool_results()
-        self._running = True
-        self._messages.append(UserMessage(content=content))
-        checkpoint()
+        original_length = len(self._messages)
+        try:
+            self._append_interrupted_tool_results()
+            self._running = True
+            self._messages.append(UserMessage(content=content))
+            checkpoint()
+        except BaseException:
+            del self._messages[original_length:]
+            self._running = False
+            raise
 
     async def run(self, checkpoint: Checkpoint) -> AssistantMessage:
         if not self._running:
