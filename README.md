@@ -1,135 +1,132 @@
 # Tauji
 
-Tauji is a remote MCP coding-agent harness for code that already lives on a VPS.
+Tauji is a small durable MCP agent harness intended to run on the same VPS as your code.
 
-It is derived from Hugging Face Tau, but the product boundary is different:
+Your local Claude Code or Codex client talks to Tauji over MCP/Streamable HTTP (typically over
+Tailscale). Tauji keeps explicit durable `agent_id` and `run_id` handles, executes agents next to
+the repository, and sends every model request through one OpenAI-compatible CLIProxyAPI endpoint.
+
+## Architecture
 
 ```text
-local Claude Code / Codex
+Claude Code / Codex
+        |
+        | MCP 2026-07-28 / Streamable HTTP
+        v
+      Tauji
+        |
+   AgentRegistry ---- SQLite
+     |      |
+   agent   child agents
+     \      /
+      AgentHarness
           |
-          | MCP 2026-07-28 over Tailscale
-          v
-        Tauji
+      CLIProxyAPI
           |
-     AgentRegistry
-       /      \
- Tau harness  child Tau harnesses
-          |
-     CLIProxyAPI only
-          |
-  any model CLIProxyAPI exposes
+     any routed model
 ```
 
-## Design
-
-- `tau_agent` remains the small provider/tool agent loop.
-- `tauji` is the VPS runtime and MCP server.
-- MCP uses the official Python SDK v2 and Streamable HTTP.
-- MCP 2026-07-28 is stateless at the protocol layer; Tauji state is explicit through `agent_id` and `run_id`.
-- Runs are non-blocking: `agent_run` returns immediately and `run_get` retrieves the eventual result.
-- Agents are retained contexts. `agent_send` steers a running agent or continues an idle one.
-- Internal `fork` creates isolated child Tau agents through the same `AgentRegistry`.
-- SQLite persists agents, transcripts, and runs across MCP/client reconnects.
-- Runs in progress during a Tauji process restart are marked `interrupted`.
-- All inference uses one OpenAI-compatible CLIProxyAPI boundary: `/v1/chat/completions`.
-- Workspaces are existing VPS directories; no upload/sync abstraction exists.
-
-The 2026-07-28 Tasks extension (SEP-2663) is intentionally not emulated: the official Python SDK v2 does not implement it yet. The explicit `run_id` API is the compatibility seam for mapping to Tasks once the Python extension implementation is ready.
+There is no TUI, provider catalog, OAuth layer, Jupyter kernel, or hidden MCP session state.
+The reusable `tau_agent` loop is the only agent engine. Recursive `fork` creates another instance
+of the same runtime.
 
 ## Install
 
 ```bash
-git clone -b mcp-agent-harness https://github.com/vai8havchoudhary/tauji
+git clone https://github.com/vai8havchoudhary/tauji.git
 cd tauji
+git switch mcp-agent-harness
 uv sync
 ```
 
-## Configuration
+## Configure
 
 ```bash
 export CLIPROXY_BASE_URL=http://127.0.0.1:8317/v1
 export CLIPROXY_API_KEY=cliproxy
 export TAUJI_MODEL=gpt-5.6
 
-# Colon-separated VPS roots agents may work under.
-export TAUJI_WORKSPACE_ROOTS=/startup:/srv/code:/home/vaibhav
+# Colon-separated directories that an MCP caller may select as workspaces.
+export TAUJI_WORKSPACE_ROOTS=/startup:/srv/code:/home/$USER
 
-# Bind directly to the VPS Tailscale address (recommended), not 0.0.0.0.
-export TAUJI_HOST=100.x.y.z
+# Bind this to the VPS Tailscale address when calling Tauji directly over tailnet.
+export TAUJI_HOST=127.0.0.1
 export TAUJI_PORT=8765
 
 export TAUJI_DATA_DIR=$HOME/.tauji
 export TAUJI_MAX_DEPTH=1
 ```
 
-## Run
+Start it:
 
 ```bash
 uv run tauji
 ```
 
-MCP endpoint:
+The MCP endpoint is:
 
 ```text
-http://<tailscale-ip>:8765/mcp
+http://<TAUJI_HOST>:8765/mcp
 ```
 
-Because this is on Tailscale, keep the port inaccessible from the public interface/firewall.
+For a Tailscale deployment, bind `TAUJI_HOST` to the VPS tailnet address rather than
+`0.0.0.0`.
 
-## MCP workflow
+## MCP surface
 
-Create:
+Tauji intentionally exposes a small handle-oriented API:
 
 ```text
-agent_create(
-  workspace="/startup/topology",
-  model="gpt-5.6",
-  name="topology"
-)
--> agent_id=agt_...
+agent_create(workspace, model?, name?, parent_id?) -> agent
+agent_list(parent_id?)                             -> agents
+agent_get(agent_id)                                -> agent
+
+agent_run(agent_id, prompt)                        -> run
+run_get(run_id)                                    -> run
+run_list(agent_id, limit=50)                       -> runs
+run_cancel(run_id)                                 -> run
+
+agent_send(agent_id, message)                      -> accepted/run_id
+agent_children(agent_id)                           -> agents
+agent_delete(agent_id)                             -> deleted agent
 ```
 
-Run:
+`agent_run` is admission-only. It returns a durable `run_id` immediately. Poll `run_get` or
+`run_list` for `running`, `completed`, `failed`, `cancelled`, or `interrupted`.
+
+A server restart converts in-flight runs to `interrupted`; transcripts and handles remain durable.
+
+## Recursive agents
+
+Every agent receives five workspace tools:
 
 ```text
-agent_run(
-  agent_id="agt_...",
-  prompt="Understand identity reconciliation and verify the implementation."
-)
--> run_id=run_..., status=running
+read
+write
+edit
+bash
+fork
 ```
 
-Poll:
+`fork(task, name?, model?)` creates an isolated child context in the same workspace and returns
+its `agent_id` and `run_id` immediately. On completion the child result is injected into its parent.
+If the parent is idle, that delivery starts a continuation; if it is active, it becomes steering.
 
-```text
-run_get(run_id="run_...")
-```
-
-Continue the retained context:
-
-```text
-agent_send(
-  agent_id="agt_...",
-  message="Now inspect the patch and verify the same invariants."
-)
-```
-
-The agent itself can use `fork` for parallel isolated workers. Child completion is automatically injected back into the parent as a follow-up message.
-
-## Local Claude Code / Codex
-
-Point the local MCP client at:
-
-```text
-http://<tailscale-ip>:8765/mcp
-```
-
-No SSH process transport is required. SSH/tmux remain useful for operating the VPS service, starting CLIProxyAPI, and inspecting repositories.
+Root and child agents use the same `AgentRegistry`; there is no separate RLM implementation.
 
 ## Development
 
 ```bash
+uv sync
 uv run pytest
-uv run ruff check src/tauji tests
-uv run mypy src/tauji
+uv run ruff check .
+uv run mypy
 ```
+
+`uv.lock` is intentionally not committed while the MCP v2 SDK is moving quickly; `uv sync`
+resolves from `pyproject.toml`.
+
+## License
+
+MIT. The retained `tau_agent` core originated in Hugging Face Tau and remains covered by the
+repository's MIT license notice.

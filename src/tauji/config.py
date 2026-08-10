@@ -15,11 +15,28 @@ class Settings:
     host: str
     port: int
     max_depth: int
+    request_timeout: float
 
     @classmethod
     def from_env(cls) -> "Settings":
-        roots_raw = os.environ.get("TAUJI_WORKSPACE_ROOTS", "/srv:/startup:/home")
-        roots = tuple(Path(p).expanduser().resolve() for p in roots_raw.split(":") if p)
+        roots = tuple(
+            Path(raw).expanduser().resolve()
+            for raw in os.environ.get("TAUJI_WORKSPACE_ROOTS", "/srv:/startup:/home").split(":")
+            if raw.strip()
+        )
+        if not roots:
+            raise ValueError("TAUJI_WORKSPACE_ROOTS must contain at least one path")
+
+        port = int(os.environ.get("TAUJI_PORT", "8765"))
+        max_depth = int(os.environ.get("TAUJI_MAX_DEPTH", "1"))
+        timeout = float(os.environ.get("TAUJI_REQUEST_TIMEOUT", "300"))
+        if not 1 <= port <= 65535:
+            raise ValueError("TAUJI_PORT must be between 1 and 65535")
+        if max_depth < 0:
+            raise ValueError("TAUJI_MAX_DEPTH must be >= 0")
+        if timeout <= 0:
+            raise ValueError("TAUJI_REQUEST_TIMEOUT must be > 0")
+
         return cls(
             base_url=os.environ.get("CLIPROXY_BASE_URL", "http://127.0.0.1:8317/v1").rstrip("/"),
             api_key=os.environ.get("CLIPROXY_API_KEY", "cliproxy"),
@@ -27,8 +44,9 @@ class Settings:
             data_dir=Path(os.environ.get("TAUJI_DATA_DIR", "~/.tauji")).expanduser().resolve(),
             workspace_roots=roots,
             host=os.environ.get("TAUJI_HOST", "127.0.0.1"),
-            port=int(os.environ.get("TAUJI_PORT", "8765")),
-            max_depth=int(os.environ.get("TAUJI_MAX_DEPTH", "1")),
+            port=port,
+            max_depth=max_depth,
+            request_timeout=timeout,
         )
 
     def validate_workspace(self, workspace: str) -> Path:
@@ -36,6 +54,6 @@ class Settings:
         if not path.is_dir():
             raise ValueError(f"workspace does not exist or is not a directory: {path}")
         if not any(path == root or path.is_relative_to(root) for root in self.workspace_roots):
-            allowed = ", ".join(map(str, self.workspace_roots))
+            allowed = ", ".join(str(root) for root in self.workspace_roots)
             raise ValueError(f"workspace {path} is outside TAUJI_WORKSPACE_ROOTS ({allowed})")
         return path

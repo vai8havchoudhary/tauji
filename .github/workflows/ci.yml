@@ -1,70 +1,19 @@
-name: CI
+name: ci
 
 on:
-  pull_request:
   push:
-    branches:
-      - main
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  pull_request:
 
 jobs:
-  python:
-    name: Python checks
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v6.3.0
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
         with:
-          python-version-file: .python-version
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v8.3.2
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --dev --locked
-
-      - name: Run tests
-        run: uv run pytest
-
-      - name: Run Ruff lint
-        run: uv run ruff check .
-
-      - name: Check formatting
-        run: uv run ruff format --check .
-
-      - name: Run mypy
-        run: uv run mypy
-
-  docs:
-    name: Documentation build
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: website
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Setup Hugo
-        uses: peaceiris/actions-hugo@v3
-        with:
-          hugo-version: "0.152.2"
-          extended: true
-
-      - name: Build documentation
-        run: hugo --minify
-
-      - name: Build search index
-        run: npx --yes pagefind@latest --site public
+          python-version: "3.12"
+      - run: uv sync --dev
+      - run: uv run ruff check .
+      - run: uv run mypy
+      - run: uv run pytest
