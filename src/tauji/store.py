@@ -156,14 +156,16 @@ class Store:
             raise ValueError("limit must be between 1 and 500")
         with self._lock:
             rows = self._db.execute(
-                "SELECT * FROM runs WHERE agent_id=? "
-                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                "SELECT * FROM runs WHERE agent_id=? ORDER BY rowid DESC LIMIT ?",
                 (agent_id, limit),
             ).fetchall()
             return [dict(row) for row in rows]
 
     def delete_agent(self, agent_id: str) -> None:
+        """Delete one already-drained agent, compatible with pre-FK Tauji databases."""
         with self._lock:
+            self._db.execute("DELETE FROM messages WHERE agent_id=?", (agent_id,))
+            self._db.execute("DELETE FROM runs WHERE agent_id=?", (agent_id,))
             self._db.execute("DELETE FROM agents WHERE id=?", (agent_id,))
             self._db.commit()
 
