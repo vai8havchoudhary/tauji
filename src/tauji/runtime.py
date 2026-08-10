@@ -72,7 +72,12 @@ class AgentRuntime:
             raise ValueError("message must be non-empty")
         async with self._control_lock:
             if self.harness.is_running:
-                self.harness.steer(message)
+                steering = UserMessage(content=message)
+                queued = self.harness.steer_message(steering)
+                self.registry.store.save_messages(
+                    self.agent_id,
+                    (*self.harness.messages, *queued.steering),
+                )
                 return self.current_run_id
 
             follow_up = UserMessage(content=message)

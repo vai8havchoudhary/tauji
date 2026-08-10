@@ -65,6 +65,24 @@ async def test_prompt_is_durable_while_provider_is_running(tmp_path: Path) -> No
     reopened.close()
 
 
+async def test_steering_is_durable_before_provider_finishes(tmp_path: Path) -> None:
+    config = settings(tmp_path)
+    provider = GateProvider()
+    registry = AgentRegistry(config, provider=provider)
+    agent = await registry.create_agent(workspace=str(config.workspace_roots[0]))
+    run = await registry.run_agent(agent["id"], "initial")
+    await provider.entered.wait()
+    steering = await registry.send(agent["id"], "durable steering")
+    assert steering["run_id"] == run["id"]
+    texts = [
+        message.text
+        for message in registry.store.load_messages(agent["id"])
+        if isinstance(message, UserMessage)
+    ]
+    assert texts == ["initial", "durable steering"]
+    await registry.aclose()
+
+
 async def test_late_cancel_cannot_overwrite_completion(tmp_path: Path) -> None:
     config = settings(tmp_path)
     provider = GateProvider()
