@@ -11,9 +11,16 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "httpx>=0.27",
+    "anyio>=4.0",
+    "httpx[socks]>=0.27",
     "mcp[cli]>=2,<3",
+    "packaging>=24.0",
+    "pillow>=11.0",
     "pydantic>=2.11",
+    "pygments>=2.18",
+    "rich>=13.0",
+    "textual>=8.2.8",
+    "typer>=0.12",
 ]
 
 [project.scripts]
@@ -28,7 +35,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tau_agent", "src/tauji"]
+packages = ["src/tau_ai", "src/tau_agent", "src/tau_coding", "src/tauji"]
 
 [tool.ruff]
 line-length = 100
@@ -45,7 +52,11 @@ indent-style = "space"
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["tau_agent", "tauji"]
+packages = ["tau_ai", "tau_agent", "tau_coding", "tauji"]
+
+[[tool.mypy.overrides]]
+module = "pygments.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
