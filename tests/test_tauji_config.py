@@ -31,6 +31,11 @@ def test_bash_network_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) ->
     assert Settings.from_env().bash_network is False
 
 
+def test_default_workspace_roots_do_not_expose_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TAUJI_WORKSPACE_ROOTS", raising=False)
+    assert Path("/home") not in Settings.from_env().workspace_roots
+
+
 def test_bash_network_env_is_strict(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TAUJI_BASH_NETWORK", "yes")
     assert Settings.from_env().bash_network is True

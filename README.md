@@ -54,7 +54,7 @@ export CLIPROXY_API_KEY=cliproxy
 export TAUJI_MODEL=gpt-5.6
 
 # Colon-separated directories that an MCP caller may select as workspaces.
-export TAUJI_WORKSPACE_ROOTS=/startup:/srv/code:/home/$USER
+export TAUJI_WORKSPACE_ROOTS=/startup:/srv/code:/home/$USER/workspace
 
 # Bind this to the VPS Tailscale address when calling Tauji directly over tailnet.
 export TAUJI_HOST=127.0.0.1

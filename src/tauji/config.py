@@ -23,7 +23,7 @@ class Settings:
     def from_env(cls) -> Settings:
         roots = tuple(
             Path(raw).expanduser().resolve()
-            for raw in os.environ.get("TAUJI_WORKSPACE_ROOTS", "/srv:/startup:/home").split(":")
+            for raw in os.environ.get("TAUJI_WORKSPACE_ROOTS", "/srv:/startup").split(":")
             if raw.strip()
         )
         if not roots:

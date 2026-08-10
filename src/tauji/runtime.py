@@ -73,11 +73,8 @@ class AgentRuntime:
         async with self._control_lock:
             if self.harness.is_running:
                 steering = UserMessage(content=message)
-                queued = self.harness.steer_message(steering)
-                self.registry.store.save_messages(
-                    self.agent_id,
-                    (*self.harness.messages, *queued.steering),
-                )
+                self.harness.steer_message(steering)
+                self._save_messages()
                 return self.current_run_id
 
             follow_up = UserMessage(content=message)
@@ -119,11 +116,11 @@ class AgentRuntime:
                     event,
                     (AgentStartEvent, MessageEndEvent, ToolExecutionStartEvent, TurnEndEvent),
                 ):
-                    self.registry.store.save_messages(self.agent_id, self.harness.messages)
+                    self._save_messages()
                 if isinstance(event, AgentEndEvent):
                     terminal = _last_assistant(event.messages)
 
-            self.registry.store.save_messages(self.agent_id, self.harness.messages)
+            self._save_messages()
             if terminal is not None and terminal.stop_reason in {"error", "aborted"}:
                 status: RunStatus = "cancelled" if terminal.stop_reason == "aborted" else "failed"
                 error = terminal.error_message or terminal.stop_reason
@@ -137,7 +134,7 @@ class AgentRuntime:
                     await self._notify_parent(run_id, result=result)
             self.registry.set_agent_status(self.agent_id, "idle")
         except asyncio.CancelledError:
-            self.registry.store.save_messages(self.agent_id, self.harness.messages)
+            self._save_messages()
             error = "cancelled" if self._cancel_status == "cancelled" else "tauji stopped"
             changed = self.registry.store.finish_run(run_id, self._cancel_status, error=error)
             self.registry.set_agent_status(self.agent_id, "idle")
@@ -146,7 +143,7 @@ class AgentRuntime:
             raise
         except Exception as exc:
             error = str(exc)
-            self.registry.store.save_messages(self.agent_id, self.harness.messages)
+            self._save_messages()
             changed = self.registry.store.finish_run(run_id, "failed", error=error)
             self.registry.set_agent_status(self.agent_id, "idle")
             if changed:
@@ -155,6 +152,13 @@ class AgentRuntime:
             if self.current_run_id == run_id:
                 self.current_run_id = None
             self._cancel_status = "cancelled"
+
+    def _save_messages(self) -> None:
+        queued = self.harness.queued_messages
+        self.registry.store.save_messages(
+            self.agent_id,
+            (*self.harness.messages, *queued.steering, *queued.follow_up),
+        )
 
     async def _notify_parent(
         self,
