@@ -3,43 +3,32 @@ requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [project]
-name = "tau-ai"
-version = "0.3.8"
-description = "A Python implementation of a minimalist Pi-style coding-agent harness."
+name = "tauji"
+version = "0.1.0"
+description = "MCP-native remote coding-agent harness built on Tau."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "anyio>=4.0",
-    "httpx[socks]>=0.27",
-    "packaging>=24.0",
-    "pillow>=11.0",
+    "httpx>=0.27",
+    "mcp[cli]>=2,<3",
     "pydantic>=2.11",
-    "pygments>=2.18",
-    "rich>=13.0",
-    "textual>=8.2.8",
-    "typer>=0.12",
 ]
 
-[project.urls]
-Homepage = "https://twotimespi.dev"
-Documentation = "https://twotimespi.dev"
-Repository = "https://github.com/huggingface/tau"
-Issues = "https://github.com/huggingface/tau/issues"
-
 [project.scripts]
-tau = "tau_coding.cli:app"
+tauji = "tauji.server:main"
 
 [dependency-groups]
 dev = [
     "mypy>=1.10",
     "pytest>=8.0",
+    "pytest-asyncio>=0.24",
     "ruff>=0.5",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tau_ai", "src/tau_agent", "src/tau_coding"]
+packages = ["src/tau_agent", "src/tauji"]
 
 [tool.ruff]
 line-length = 100
@@ -56,11 +45,7 @@ indent-style = "space"
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["tau_ai", "tau_agent", "tau_coding"]
-
-[[tool.mypy.overrides]]
-module = "pygments.*"
-ignore_missing_imports = true
+packages = ["tau_agent", "tauji"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
