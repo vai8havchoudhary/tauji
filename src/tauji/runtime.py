@@ -93,34 +93,58 @@ class AgentRuntime:
 
     async def _consume(self, run_id: str, stream: Any) -> None:
         self.registry.set_agent_status(self.agent_id, "running")
-        result = ""
+        terminal: AssistantMessage | None = None
         try:
             async for event in stream:
                 if isinstance(event, AgentEndEvent):
-                    result = _final_text(event.messages)
+                    terminal = _last_assistant(event.messages)
+
             self.registry.store.save_messages(self.agent_id, self.harness.messages)
-            self.registry.store.finish_run(run_id, "completed", result=result)
+            if terminal is not None and terminal.stop_reason in {"error", "aborted"}:
+                status = "cancelled" if terminal.stop_reason == "aborted" else "failed"
+                error = terminal.error_message or terminal.stop_reason
+                self.registry.store.finish_run(run_id, status, error=error)
+                await self._notify_parent(run_id, error=error)
+            else:
+                result = terminal.text if terminal is not None else ""
+                self.registry.store.finish_run(run_id, "completed", result=result)
+                await self._notify_parent(run_id, result=result)
             self.registry.set_agent_status(self.agent_id, "idle")
-            if self.parent_id is not None:
-                await self.registry.deliver_child_result(
-                    parent_id=str(self.parent_id),
-                    child_id=self.agent_id,
-                    child_name=self.name,
-                    run_id=run_id,
-                    result=result,
-                )
         except asyncio.CancelledError:
             self.registry.store.save_messages(self.agent_id, self.harness.messages)
             self.registry.store.finish_run(run_id, "cancelled", error="cancelled")
             self.registry.set_agent_status(self.agent_id, "idle")
             raise
         except Exception as exc:
+            error = str(exc)
             self.registry.store.save_messages(self.agent_id, self.harness.messages)
-            self.registry.store.finish_run(run_id, "failed", error=str(exc))
+            self.registry.store.finish_run(run_id, "failed", error=error)
             self.registry.set_agent_status(self.agent_id, "idle")
+            await self._notify_parent(run_id, error=error)
         finally:
             if self.current_run_id == run_id:
                 self.current_run_id = None
+
+    async def _notify_parent(
+        self,
+        run_id: str,
+        *,
+        result: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        if self.parent_id is None:
+            return
+        try:
+            await self.registry.deliver_child_outcome(
+                parent_id=str(self.parent_id),
+                child_id=self.agent_id,
+                child_name=self.name,
+                run_id=run_id,
+                result=result,
+                error=error,
+            )
+        except Exception:
+            return
 
 
 class AgentRegistry:
@@ -241,20 +265,23 @@ class AgentRegistry:
             self._agents.pop(agent_id, None)
         return info
 
-    async def deliver_child_result(
+    async def deliver_child_outcome(
         self,
         *,
         parent_id: str,
         child_id: str,
         child_name: str,
         run_id: str,
-        result: str,
+        result: str | None,
+        error: str | None,
     ) -> None:
+        tag = "child_error" if error is not None else "child_result"
+        body = error if error is not None else (result or "")
         parent = await self.get_runtime(parent_id)
         await parent.send(
-            f"<child_result agent_id={child_id!r} run_id={run_id!r} name={child_name!r}>\n"
-            f"{result}\n"
-            "</child_result>"
+            f"<{tag} agent_id={child_id!r} run_id={run_id!r} name={child_name!r}>\n"
+            f"{body}\n"
+            f"</{tag}>"
         )
 
     def agent_info(self, agent_id: str) -> dict[str, Any]:
@@ -310,8 +337,8 @@ def _normalize_name(name: str) -> str:
     return normalized
 
 
-def _final_text(messages: list[Any] | tuple[Any, ...]) -> str:
+def _last_assistant(messages: list[Any] | tuple[Any, ...]) -> AssistantMessage | None:
     for message in reversed(messages):
-        if isinstance(message, AssistantMessage) and message.text:
-            return message.text
-    return ""
+        if isinstance(message, AssistantMessage):
+            return message
+    return None
