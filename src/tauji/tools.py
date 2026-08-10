@@ -9,14 +9,8 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tau_agent.messages import TextContent
-from tau_agent.tools import (
-    AgentTool,
-    AgentToolResult,
-    ToolCancellationToken,
-    ToolUpdateCallback,
-)
-from tau_agent.types import JSONValue
+from tauji.engine import AgentTool
+from tauji.transcript import JSONValue
 
 if TYPE_CHECKING:
     from tauji.runtime import AgentRuntime
@@ -30,7 +24,6 @@ def coding_tools(runtime: AgentRuntime) -> list[AgentTool]:
     return [
         _tool(
             "read",
-            "Read file",
             "Read a UTF-8 text file inside the workspace, optionally by 1-based line range.",
             {
                 "type": "object",
@@ -46,7 +39,6 @@ def coding_tools(runtime: AgentRuntime) -> list[AgentTool]:
         ),
         _tool(
             "write",
-            "Write file",
             "Create or replace a UTF-8 text file inside the workspace.",
             {
                 "type": "object",
@@ -61,7 +53,6 @@ def coding_tools(runtime: AgentRuntime) -> list[AgentTool]:
         ),
         _tool(
             "edit",
-            "Edit file",
             "Replace exactly one occurrence of literal text in a workspace file.",
             {
                 "type": "object",
@@ -77,7 +68,6 @@ def coding_tools(runtime: AgentRuntime) -> list[AgentTool]:
         ),
         _tool(
             "bash",
-            "Run command",
             "Run a sandboxed shell command in the workspace. Output is capped at 30k characters.",
             {
                 "type": "object",
@@ -97,7 +87,6 @@ def coding_tools(runtime: AgentRuntime) -> list[AgentTool]:
         ),
         _tool(
             "fork",
-            "Fork agent",
             (
                 "Spawn an isolated child agent in this workspace. "
                 "Returns agent/run handles immediately."
@@ -119,29 +108,19 @@ def coding_tools(runtime: AgentRuntime) -> list[AgentTool]:
 
 def _tool(
     name: str,
-    label: str,
     description: str,
     schema: Mapping[str, JSONValue],
     fn: _TOOL,
 ) -> AgentTool:
-    async def execute(
-        tool_call_id: str,
-        arguments: Mapping[str, JSONValue],
-        signal: ToolCancellationToken | None = None,
-        on_update: ToolUpdateCallback | None = None,
-    ) -> AgentToolResult:
-        del tool_call_id, signal, on_update
+    async def execute(arguments: Mapping[str, JSONValue]) -> str:
         value = fn(arguments)
-        text = value if isinstance(value, str) else await value
-        return AgentToolResult(content=[TextContent(text=text)])
+        return value if isinstance(value, str) else await value
 
     return AgentTool(
         name=name,
-        label=label,
         description=description,
         parameters=schema,
-        execute_fn=execute,
-        execution_mode="sequential",
+        execute=execute,
     )
 
 

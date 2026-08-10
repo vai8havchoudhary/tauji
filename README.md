@@ -20,16 +20,15 @@ Claude Code / Codex
      |      |
    agent   child agents
      \      /
-      AgentHarness
+     Tauji engine
           |
       CLIProxyAPI
           |
      any routed model
 ```
 
-There is no TUI, provider catalog, OAuth layer, Jupyter kernel, or hidden MCP session state.
-The reusable `tau_agent` loop is the only agent engine. Recursive `fork` creates another instance
-of the same runtime.
+There is no TUI, provider catalog, OAuth layer, Jupyter kernel, reusable Tau compatibility package,
+or hidden MCP session state. Recursive `fork` creates another instance of the same Tauji runtime.
 
 ## Install
 
@@ -145,5 +144,4 @@ uv run mypy
 
 ## License
 
-MIT. The retained `tau_agent` core originated in Hugging Face Tau and remains covered by the
-repository's MIT license notice.
+MIT.

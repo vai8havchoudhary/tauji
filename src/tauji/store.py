@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import TypeAdapter
 
-from tau_agent.messages import AgentMessage
+from tauji.transcript import AgentMessage
 
 _MESSAGE: TypeAdapter[AgentMessage] = TypeAdapter(AgentMessage)
 _AGENT_FIELDS = ("id", "name", "parent_id", "workspace", "model", "depth", "status")

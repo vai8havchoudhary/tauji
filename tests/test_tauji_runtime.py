@@ -4,11 +4,10 @@ from typing import Any
 
 import pytest
 
-from tau_agent.messages import AssistantMessage, TextContent, Usage, UserMessage
-from tau_agent.provider_events import AssistantDoneEvent
 from tauji.config import Settings
 from tauji.runtime import AgentRegistry
 from tauji.store import Store
+from tauji.transcript import AssistantMessage, TextContent, UserMessage
 
 
 class GateProvider:
@@ -16,18 +15,13 @@ class GateProvider:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def stream_response(self, **_kwargs: Any) -> Any:
+    async def response(self, **_kwargs: Any) -> AssistantMessage:
         self.entered.set()
         await self.release.wait()
-        message = AssistantMessage(
+        return AssistantMessage(
             content=[TextContent(text="DONE")],
-            api="test",
-            provider="test",
-            model="test",
-            usage=Usage(input=0, output=0, total_tokens=0),
             stop_reason="stop",
         )
-        yield AssistantDoneEvent(reason="stop", message=message)
 
     async def aclose(self) -> None:
         pass
@@ -37,17 +31,12 @@ class RecordingProvider:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
-    async def stream_response(self, **kwargs: Any) -> Any:
+    async def response(self, **kwargs: Any) -> AssistantMessage:
         self.calls.append([message.text for message in kwargs["messages"]])
-        message = AssistantMessage(
+        return AssistantMessage(
             content=[TextContent(text="DONE")],
-            api="test",
-            provider="test",
-            model="test",
-            usage=Usage(input=0, output=0, total_tokens=0),
             stop_reason="stop",
         )
-        yield AssistantDoneEvent(reason="stop", message=message)
 
     async def aclose(self) -> None:
         pass
@@ -188,6 +177,22 @@ async def test_late_cancel_cannot_overwrite_completion(tmp_path: Path) -> None:
     registry._lock.release()
 
     assert (await cancel_task)["status"] == "completed"
+    await registry.aclose()
+
+
+async def test_immediate_cancel_finishes_run_before_task_starts(tmp_path: Path) -> None:
+    config = settings(tmp_path)
+    registry = AgentRegistry(config, provider=GateProvider())
+    agent = await registry.create_agent(workspace=str(config.workspace_roots[0]))
+    run = await registry.run_agent(agent["id"], "cancel immediately")
+
+    cancelled = await registry.cancel_run(run["id"])
+
+    assert cancelled["status"] == "cancelled"
+    assert registry.agent_info(agent["id"])["status"] == "idle"
+    assert [message.text for message in registry.store.load_messages(agent["id"])] == [
+        "cancel immediately"
+    ]
     await registry.aclose()
 
 

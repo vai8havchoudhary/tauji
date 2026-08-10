@@ -6,19 +6,12 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
-from tau_agent.events import (
-    AgentEndEvent,
-    AgentStartEvent,
-    MessageEndEvent,
-    ToolExecutionStartEvent,
-    TurnEndEvent,
-)
-from tau_agent.harness import AgentHarness, AgentHarnessConfig
-from tau_agent.messages import AssistantMessage, UserMessage
 from tauji.config import Settings
+from tauji.engine import AgentHarness, ModelProvider
 from tauji.provider import CLIProxyProvider
 from tauji.store import RunStatus, Store
 from tauji.tools import coding_tools
+from tauji.transcript import AgentMessage, UserMessage
 
 SYSTEM_PROMPT = """You are Tauji, a coding agent running beside the repository on a VPS.
 Inspect and modify the workspace with tools. Verify substantive changes.
@@ -33,7 +26,7 @@ class AgentRuntime:
         *,
         registry: AgentRegistry,
         row: dict[str, Any],
-        messages: list[Any],
+        messages: list[AgentMessage],
     ) -> None:
         self.registry = registry
         self.agent_id = str(row["id"])
@@ -47,25 +40,23 @@ class AgentRuntime:
         self._control_lock = asyncio.Lock()
         self._cancel_status: Literal["cancelled", "interrupted"] = "cancelled"
 
-        config = AgentHarnessConfig(
+        self.harness = AgentHarness(
             provider=registry.provider,
             model=self.model,
             system=(
                 SYSTEM_PROMPT
                 + f"\nWorkspace: {self.workspace}\nAgent: {self.name}\nDepth: {self.depth}\n"
             ),
-            tools=[],
-            queue_mode="all",
+            tools=coding_tools(self),
+            messages=messages,
         )
-        self.harness = AgentHarness(config, messages=messages)
-        self.harness.config.tools[:] = coding_tools(self)
 
     @property
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
 
     async def start_prompt(self, run_id: str, prompt: str) -> None:
-        self._start(run_id, self.harness.prompt(prompt))
+        self._start(run_id, prompt)
 
     async def send(self, message: str) -> str | None:
         if not message.strip():
@@ -76,20 +67,18 @@ class AgentRuntime:
                 if self.is_running and not self.harness.is_running:
                     finishing = self._task
                 elif self.harness.is_running:
-                    steering = UserMessage(content=message)
-                    self.harness.steer_message(steering)
+                    self.harness.steer(message)
                     self._save_messages()
                     return self.current_run_id
                 else:
-                    follow_up = UserMessage(content=message)
                     run_id = self.registry._new_run_id()
                     self.registry.store.create_run(
                         run_id,
                         self.agent_id,
                         f"[follow-up] {message}",
-                        messages=(*self.harness.messages, follow_up),
+                        messages=(*self.harness.messages, UserMessage(content=message)),
                     )
-                    self._start(run_id, self.harness.prompt_message(follow_up))
+                    self._start(run_id, message)
                     return run_id
             if finishing is not None:
                 try:
@@ -100,44 +89,47 @@ class AgentRuntime:
 
     async def cancel(self, *, status: Literal["cancelled", "interrupted"] = "cancelled") -> None:
         self._cancel_status = status
-        self.harness.cancel()
         task = self._task
+        run_id = self.current_run_id
         if task is not None and not task.done():
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            self.harness.interrupt()
+            self._save_messages()
+            if run_id is not None:
+                error = "cancelled" if status == "cancelled" else "tauji stopped"
+                changed = self.registry.store.finish_run(run_id, status, error=error)
+                self.registry.set_agent_status(self.agent_id, "idle")
+                if changed and status == "cancelled":
+                    await self._notify_parent(run_id, error=error)
+                if self.current_run_id == run_id:
+                    self.current_run_id = None
+        self._cancel_status = "cancelled"
 
-    def _start(self, run_id: str, stream: Any) -> None:
+    def _start(self, run_id: str, prompt: str) -> None:
         if self.is_running:
             raise RuntimeError(f"agent {self.agent_id} already has an active run")
         self.current_run_id = run_id
+        self.harness.prepare_prompt(prompt, self._save_messages)
         self._task = asyncio.create_task(
-            self._consume(run_id, stream),
+            self._consume(run_id),
             name=f"tauji:{run_id}",
         )
 
-    async def _consume(self, run_id: str, stream: Any) -> None:
+    async def _consume(self, run_id: str) -> None:
         self.registry.set_agent_status(self.agent_id, "running")
-        terminal: AssistantMessage | None = None
         try:
-            async for event in stream:
-                if isinstance(
-                    event,
-                    (AgentStartEvent, MessageEndEvent, ToolExecutionStartEvent, TurnEndEvent),
-                ):
-                    self._save_messages()
-                if isinstance(event, AgentEndEvent):
-                    terminal = _last_assistant(event.messages)
-
+            terminal = await self.harness.run(self._save_messages)
             self._save_messages()
-            if terminal is not None and terminal.stop_reason in {"error", "aborted"}:
+            if terminal.stop_reason in {"error", "aborted"}:
                 status: RunStatus = "cancelled" if terminal.stop_reason == "aborted" else "failed"
                 error = terminal.error_message or terminal.stop_reason
                 changed = self.registry.store.finish_run(run_id, status, error=error)
                 if changed:
                     await self._notify_parent(run_id, error=error)
             else:
-                result = terminal.text if terminal is not None else ""
+                result = terminal.text
                 changed = self.registry.store.finish_run(run_id, "completed", result=result)
                 if changed:
                     await self._notify_parent(run_id, result=result)
@@ -163,10 +155,9 @@ class AgentRuntime:
             self._cancel_status = "cancelled"
 
     def _save_messages(self) -> None:
-        queued = self.harness.queued_messages
         self.registry.store.save_messages(
             self.agent_id,
-            (*self.harness.messages, *queued.steering, *queued.follow_up),
+            (*self.harness.messages, *self.harness.steering_messages),
         )
 
     async def _notify_parent(
@@ -196,7 +187,7 @@ class AgentRegistry:
         self,
         settings: Settings,
         *,
-        provider: CLIProxyProvider | None = None,
+        provider: ModelProvider | None = None,
         store: Store | None = None,
     ) -> None:
         self.settings = settings
@@ -389,10 +380,3 @@ def _normalize_name(name: str) -> str:
     if len(normalized) > 64:
         raise ValueError("name must be at most 64 characters")
     return normalized
-
-
-def _last_assistant(messages: list[Any] | tuple[Any, ...]) -> AssistantMessage | None:
-    for message in reversed(messages):
-        if isinstance(message, AssistantMessage):
-            return message
-    return None

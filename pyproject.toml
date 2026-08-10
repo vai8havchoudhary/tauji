@@ -31,7 +31,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tau_agent", "src/tauji"]
+packages = ["src/tauji"]
 
 [tool.ruff]
 line-length = 100
@@ -48,7 +48,7 @@ indent-style = "space"
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["tau_agent", "tauji"]
+packages = ["tauji"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

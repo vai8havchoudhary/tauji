@@ -26,17 +26,15 @@ async def test_malformed_provider_response_is_an_error(payload: object, error: s
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     provider = CLIProxyProvider("http://proxy/v1", "key", client=client)
-    events = [
-        event
-        async for event in provider.stream_response(
-            model="model",
-            system="system",
-            messages=[],
-            tools=[],
-        )
-    ]
-    assert events[-1].reason == "error"
-    assert error in events[-1].error.error_message
+    message = await provider.response(
+        model="model",
+        system="system",
+        messages=[],
+        tools=[],
+    )
+    assert message.stop_reason == "error"
+    assert message.error_message is not None
+    assert error in message.error_message
     await provider.aclose()
 
 
@@ -52,15 +50,12 @@ async def test_valid_provider_response_completes() -> None:
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     provider = CLIProxyProvider("http://proxy/v1", "key", client=client)
-    events = [
-        event
-        async for event in provider.stream_response(
-            model="model",
-            system="system",
-            messages=[],
-            tools=[],
-        )
-    ]
-    assert events[-1].reason == "stop"
-    assert events[-1].message.text == "OK"
+    message = await provider.response(
+        model="model",
+        system="system",
+        messages=[],
+        tools=[],
+    )
+    assert message.stop_reason == "stop"
+    assert message.text == "OK"
     await provider.aclose()

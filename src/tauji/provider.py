@@ -1,29 +1,20 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 import httpx
 
-from tau_agent.messages import (
+from tauji.engine import AgentTool
+from tauji.transcript import (
     AgentMessage,
     AssistantContent,
     AssistantMessage,
-    BashExecutionMessage,
-    BranchSummaryMessage,
-    CompactionSummaryMessage,
-    CustomMessage,
-    ImageContent,
     TextContent,
     ToolCall,
     ToolResultMessage,
-    Usage,
     UserMessage,
 )
-from tau_agent.provider import CancellationToken
-from tau_agent.provider_events import AssistantDoneEvent, AssistantErrorEvent, AssistantMessageEvent
-from tau_agent.tools import AgentTool
 
 
 class CLIProxyProvider:
@@ -42,24 +33,14 @@ class CLIProxyProvider:
         self.timeout = timeout
         self._client = client
 
-    async def stream_response(
+    async def response(
         self,
         *,
         model: str,
         system: str,
         messages: list[AgentMessage],
         tools: list[AgentTool],
-        signal: CancellationToken | None = None,
-        session_id: str | None = None,
-    ) -> AsyncIterator[AssistantMessageEvent]:
-        del session_id
-        if signal and signal.is_cancelled():
-            yield AssistantErrorEvent(
-                reason="aborted",
-                error=_error_message(model, "aborted", "request cancelled"),
-            )
-            return
-
+    ) -> AssistantMessage:
         payload: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "system", "content": system}, *map(_to_openai_message, messages)],
@@ -115,26 +96,12 @@ class CLIProxyProvider:
                 if finish_reason == "length"
                 else "stop"
             )
-            usage = data.get("usage") or {}
-            message = AssistantMessage(
+            return AssistantMessage(
                 content=content,
-                api="openai-chat",
-                provider="cliproxy",
-                model=model,
-                response_id=data.get("id"),
-                usage=Usage(
-                    input=int(usage.get("prompt_tokens") or 0),
-                    output=int(usage.get("completion_tokens") or 0),
-                    total_tokens=int(usage.get("total_tokens") or 0),
-                ),
                 stop_reason=stop_reason,
             )
-            yield AssistantDoneEvent(reason=stop_reason, message=message)
         except Exception as exc:
-            yield AssistantErrorEvent(
-                reason="error",
-                error=_error_message(model, "error", str(exc)),
-            )
+            return _error_message(str(exc))
 
     async def aclose(self) -> None:
         if self._client is not None:
@@ -188,22 +155,17 @@ def _response_message(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, A
     return choice, raw_message
 
 
-def _error_message(
-    model: str, reason: Literal["aborted", "error"], message: str
-) -> AssistantMessage:
+def _error_message(message: str) -> AssistantMessage:
     return AssistantMessage(
         content=[],
-        api="openai-chat",
-        provider="cliproxy",
-        model=model,
-        stop_reason=reason,
+        stop_reason="error",
         error_message=message,
     )
 
 
 def _to_openai_message(message: AgentMessage) -> dict[str, Any]:
     if isinstance(message, UserMessage):
-        return {"role": "user", "content": _user_content(message.content)}
+        return {"role": "user", "content": message.content}
     if isinstance(message, AssistantMessage):
         out: dict[str, Any] = {"role": "assistant", "content": message.text or None}
         if message.tool_calls:
@@ -225,29 +187,4 @@ def _to_openai_message(message: AgentMessage) -> dict[str, Any]:
             "tool_call_id": message.tool_call_id,
             "content": message.text,
         }
-    if isinstance(message, BashExecutionMessage):
-        return {"role": "user", "content": f"[bash]\n{message.command}\n{message.output}"}
-    if isinstance(message, CustomMessage):
-        return {"role": "user", "content": message.text}
-    if isinstance(message, BranchSummaryMessage):
-        return {"role": "user", "content": f"[branch summary]\n{message.summary}"}
-    if isinstance(message, CompactionSummaryMessage):
-        return {"role": "user", "content": f"[compaction summary]\n{message.summary}"}
     raise TypeError(f"unsupported message: {type(message).__name__}")
-
-
-def _user_content(content: Any) -> Any:
-    if isinstance(content, str):
-        return content
-    blocks: list[dict[str, Any]] = []
-    for block in content:
-        if isinstance(block, TextContent):
-            blocks.append({"type": "text", "text": block.text})
-        elif isinstance(block, ImageContent):
-            blocks.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"},
-                }
-            )
-    return blocks
