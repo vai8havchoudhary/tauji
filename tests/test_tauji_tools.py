@@ -19,6 +19,17 @@ def test_path_cannot_escape_workspace(tmp_path: Path) -> None:
         _path(tmp_path, "../outside")
 
 
+def test_path_cannot_escape_through_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="escapes"):
+        _write(workspace, {"path": "link/leak", "content": "blocked"})
+    assert not (outside / "leak").exists()
+
+
 def test_bash_fails_closed_without_bubblewrap(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="sandbox unavailable"):
         _bwrap_command(
